@@ -6,7 +6,7 @@ import sys
 import argparse
 from peer import Peer
 from ui_handler import UIHandler
-
+import time
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='P2P LAN Chat System with File Sharing')

@@ -4,6 +4,9 @@ User interface for the P2P LAN Chat System.
 """
 import os
 import sys
+import select
+import time
+
 
 class UIHandler:
     """
@@ -32,6 +35,51 @@ class UIHandler:
         """
         self.peer = peer
     
+
+    def process_command(self, user_input):
+        if not user_input:
+            return
+
+        # Handle normal messages
+        if not user_input.startswith('/'):
+            self._handle_regular_message(user_input)
+            return
+
+        # Split command and arguments
+        parts = user_input[1:].split(maxsplit=1)
+        command = parts[0].lower()
+        args = parts[1].split() if len(parts) > 1 else []
+
+        # Improved command mapping
+        commands = {
+            'help': self._cmd_help,
+            'connect': self._cmd_connect,
+            'peers': self._cmd_peers,
+            'send': self._cmd_send,
+            'sendall': self._cmd_sendall,
+            'file': self._cmd_file,
+            'disconnect': self._cmd_disconnect,
+            'quit': self._cmd_quit
+        }
+
+        if command in commands:
+            commands[command](args)
+        else:
+            print(f"Unknown command: /{command}")
+            print("Type /help for available commands")
+
+
+    def _handle_regular_message(self, message):
+        """Handle a regular chat message (not a command)."""
+        if not self.peer.peers:
+            print("You are not connected to any peers. Connect with /connect or wait for peers to be discovered.")
+        else:
+            results = self.peer.send_message_to_all(message)
+            success_count = sum(1 for success in results.values() if success)
+            if success_count > 0:
+                print(f"Message sent to {success_count} peer(s)")
+
+
     def print_welcome_message(self):
         """Print welcome message and basic instructions."""
         print("\n" + "="*60)
@@ -60,11 +108,20 @@ class UIHandler:
         """Main command loop for processing user input."""
         while True:
             try:
-                user_input = self.get_user_input("> ")
-                if not user_input:
-                    continue
+                # Check for input without blocking
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    user_input = sys.stdin.readline().strip()
+                    self.process_command(user_input)
+
+                else:
+                    time.sleep(0.1)
+
+            except KeyboardInterrupt:
+                print("\nUse /quit to exit properly")
+            except Exception as e:
+                print(f"Error: {str(e)}")
                 
-                # Check if this is a command
+        """
                 if user_input.startswith('/'):
                     # Parse the command
                     parts = user_input.split()
@@ -85,13 +142,20 @@ class UIHandler:
                         results = self.peer.send_message_to_all(user_input)
                         success_count = sum(1 for success in results.values() if success)
                         if success_count > 0:
-                            print(f"Message sent to {success_count} peer(s)")
-            except KeyboardInterrupt:
-                # Handle Ctrl+C
-                print("\nUse /quit to exit")
-            except Exception as e:
-                print(f"Error: {e}")
+                            print(f"Message sent to {success_count} peer(s)")"""
+
     
+
+
+    def _get_non_blocking_input(self):
+        """Platform-independent non-blocking input"""
+        if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+            return sys.stdin.readline().strip()
+        return None
+
+
+
+
     def _cmd_help(self, args):
         """Show help for available commands."""
         print("\nAvailable commands:")
@@ -132,9 +196,10 @@ class UIHandler:
             return
         
         print("\nConnected peers:")
-        for peer_id, info in peers.items():
-            print(f"  {info['nickname']} ({peer_id})")
-            print(f"    IP: {info['ip']}:{info['port']}")
+        for pid, info in peers.items():
+            print(f"  {info['nickname']} ({pid[:8]})")
+            print(f"    Address: {info['ip']}:{info['port']}")
+            print(f"    Status: {info['status']}\n")
         print()
     
     def _cmd_send(self, args):
@@ -145,12 +210,19 @@ class UIHandler:
             args (list): Command arguments [peer_id, message...]
         """
         if len(args) < 2:
-            print("Usage: /send <peer_id> <message>")
+            print("Usage: /send [username|peer_id] message")
             return
         
-        peer_id = args[0]
+        identifier = args[0]
         message = ' '.join(args[1:])
+
+        peer_id = self.peer.find_peer_id(identifier)
         
+        if not peer_id:
+            print(f"No peer found matching '{identifier}'")
+            self._cmd_peers([])
+            return
+
         if self.peer.send_message_to_peer(peer_id, message):
             print(f"Message sent to peer {peer_id}")
         else:
@@ -170,11 +242,10 @@ class UIHandler:
         message = ' '.join(args)
         results = self.peer.send_message_to_all(message)
         
-        success_count = sum(1 for success in results.values() if success)
-        if success_count > 0:
-            print(f"Message sent to {success_count} peer(s)")
-        else:
-            print("Failed to send message to any peers")
+        success = sum(results.values())
+        total = len(results)
+        print(f"Delivered to {success}/{total} peers")
+
     
     def _cmd_file(self, args):
         """

@@ -5,6 +5,7 @@ Utility functions for the P2P LAN Chat System.
 import socket
 import uuid
 import random
+import time
 
 def get_local_ip():
     """

@@ -32,6 +32,9 @@ class Peer:
         self.port = port
         self.running = False
         self.server_socket = None
+        self.username_to_id = {}  # {username: peer_id}
+        self.peer_id_to_username = {}  # {peer_id: username}
+
         
         # Initialize components
         self.message_handler = MessageHandler(self)
@@ -177,10 +180,39 @@ class Peer:
     
     def get_peers(self):
         """Get a list of connected peers."""
-        with self.peers_lock:
-            return {pid: {k: v for k, v in info.items() if k != 'socket'} 
-                    for pid, info in self.peers.items()}
+        return {
+            pid: {
+                'nickname': info['nickname'],
+                'ip': info['ip'],
+                'port': info['port'],
+                'status': 'Connected' if info['socket'].fileno() != -1 else 'Disconnected'
+            }
+            for pid, info in self.peers.items()
+        }
+
+
+
+
+    def get_username(self, peer_id):
+        return self.peers[peer_id].get('nickname', 'Unknown')
+
+
+
+    def find_peer_id(self, identifier):
+        """Find peer by username or partial ID"""
+        # Check exact username match
+        for pid, info in self.peers.items():
+            if info['nickname'].lower() == identifier.lower():
+                return pid
     
+        # Check partial ID match
+        for pid in self.peers:
+            if pid.startswith(identifier):
+                return pid
+    
+        return None
+
+
     def send_message_to_peer(self, peer_id, message):
         """
         Send a text message to a specific peer.
@@ -286,6 +318,14 @@ class Peer:
             print(f"Error handling incoming connection from {addr}: {e}")
             client_socket.close()
     
+
+    def _update_usernames(self, peer_id, username):
+        """Validate and update username mappings"""
+        if username in self.username_to_id and self.username_to_id[username] != peer_id:
+            raise ValueError(f"Username {username} already exists")
+        self.username_to_id[username] = peer_id
+        self.peer_id_to_username[peer_id] = username
+
     def _handle_peer(self, peer_id, client_socket):
         """
         Handle communications with a connected peer.

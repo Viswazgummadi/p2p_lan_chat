@@ -67,8 +67,15 @@ class MessageHandler:
         """
         results = {}
         with self.peer.peers_lock:
-            for peer_id in list(self.peer.peers.keys()):
-                results[peer_id] = self.send_message(peer_id, message_content)
+            current_peers = list(self.peer.peers.items())
+        for peer_id,peer_info in current_peers:
+            try:
+                success = self.send_message(peer_id, message_content)
+                results[peer_id] = success
+                if not success:
+                    print(f"Failed to send to {peer_info['nickname']}")
+            except Exception as e:
+                print(f"Failed to send to {peer_info['nickname']}: {str(e)}")
         return results
     
     def handle_message(self, sender_id, message):
