@@ -6,6 +6,7 @@ import os
 import sys
 import select
 import time
+import readline  # Add this import for command history support
 
 
 class UIHandler:
@@ -23,8 +24,38 @@ class UIHandler:
             '/sendall': (self._cmd_sendall, 'Send message to all peers: /sendall <message>'),
             '/file': (self._cmd_file, 'Send file to specific peer: /file <peer_id> <filepath>'),
             '/disconnect': (self._cmd_disconnect, 'Disconnect from a peer: /disconnect <peer_id>'),
-            '/quit': (self._cmd_quit, 'Exit the application')
+            '/quit': (self._cmd_quit, 'Exit the application'),
+            '/clear': (self._cmd_clear, 'Clear the screen'),
+            '/exit': (self._cmd_quit, 'Exit the program'),
+            '/discover': (self._cmd_discover, 'List all discovered peers')
         }
+
+        # Set up readline with history support
+        histfile = os.path.join(os.path.expanduser("~"), ".p2pchat_history")
+        try:
+            readline.read_history_file(histfile)
+            # Set history length limit
+            readline.set_history_length(1000)
+        except FileNotFoundError:
+            # Create the file if it doesn't exist
+            open(histfile, 'a').close()
+        
+        # Register to save history on exit
+        import atexit
+        atexit.register(readline.write_history_file, histfile)
+
+
+    def _cmd_discover(self, args):
+        """Show discovered peers"""
+        discovered = self.peer.discovery.get_discovered_peers()
+        print("\nDiscovered peers:")
+        for pid, info in discovered.items():
+            print(f" {info['nickname']} ({pid[:8]})")
+            print(f" Address: {info['ip']}:{info['port']}")
+            print(f" Last seen: {time.ctime(info['last_seen'])}\n")
+
+
+
     
     def set_peer(self, peer):
         """
@@ -35,6 +66,10 @@ class UIHandler:
         """
         self.peer = peer
     
+    def _cmd_clear(self, args):
+        """Cross-platform screen clearing"""
+        os.system('cls' if os.name == 'nt' else 'clear')
+
 
     def process_command(self, user_input):
         if not user_input:
@@ -52,6 +87,7 @@ class UIHandler:
 
         # Improved command mapping
         commands = {
+            'discover': self._cmd_discover,
             'help': self._cmd_help,
             'connect': self._cmd_connect,
             'peers': self._cmd_peers,
@@ -59,7 +95,9 @@ class UIHandler:
             'sendall': self._cmd_sendall,
             'file': self._cmd_file,
             'disconnect': self._cmd_disconnect,
-            'quit': self._cmd_quit
+            'quit': self._cmd_quit,
+            'clear': self._cmd_clear,  # ADDED MISSING CLEAR COMMAND
+            'exit': self._cmd_quit
         }
 
         if command in commands:
@@ -108,13 +146,15 @@ class UIHandler:
         """Main command loop for processing user input."""
         while True:
             try:
-                # Check for input without blocking
-                if select.select([sys.stdin], [], [], 0)[0]:
-                    user_input = sys.stdin.readline().strip()
+                user_input = input("\033[1;32mCHAT>\033[0m ").strip()
+                # Process non-empty input
+                if user_input.lower() in ('/quit', '/exit'):
+                    self._cmd_quit([])
+                    return
+
+                if user_input.strip():
                     self.process_command(user_input)
 
-                else:
-                    time.sleep(0.1)
 
             except KeyboardInterrupt:
                 print("\nUse /quit to exit properly")
@@ -193,15 +233,11 @@ class UIHandler:
         peers = self.peer.get_peers()
         if not peers:
             print("No peers connected")
-            return
-        
-        print("\nConnected peers:")
-        for pid, info in peers.items():
-            print(f"  {info['nickname']} ({pid[:8]})")
-            print(f"    Address: {info['ip']}:{info['port']}")
-            print(f"    Status: {info['status']}\n")
-        print()
-    
+        else:
+            print("\nConnected peers:")
+            for pid, info in peers.items():
+                print(f"  {info['nickname']} ({pid[:8]}) - {info['ip']}:{info['port']}")
+
     def _cmd_send(self, args):
         """
         Send a message to a specific peer.
@@ -255,24 +291,26 @@ class UIHandler:
             args (list): Command arguments [peer_id, filepath]
         """
         if len(args) < 2:
-            print("Usage: /file <peer_id> <filepath>")
+            print("Usage: /file <peer> <filepath>\n"
+                  "Example: /file alice ~/documents/report.pdf")
             return
         
-        peer_id = args[0]
-        file_path = ' '.join(args[1:])
-        
-        # Expand ~ in file path
-        file_path = os.path.expanduser(file_path)
-        
+        peer_id = self.peer.find_peer_id(args[0])
+        if not peer_id:
+            print(f"🔴 Peer '{args[0]}' not found. Available peers:")
+            self._cmd_peers([])
+            return
+            
+        file_path = os.path.expanduser(' '.join(args[1:]))
         if not os.path.exists(file_path):
-            print(f"File not found: {file_path}")
+            print(f"🔴 File not found: {file_path}")
             return
-        
-        print(f"Sending file {file_path} to peer {peer_id}...")
+        print(f"📤 Initiating file transfer to {args[0]}...")
         if self.peer.send_file_to_peer(peer_id, file_path):
-            print(f"File transfer initiated to peer {peer_id}")
+            print("🔄 Transfer in progress...")
         else:
-            print(f"Failed to initiate file transfer to peer {peer_id}")
+            print("🔴 Failed to start transfer")
+
     
     def _cmd_disconnect(self, args):
         """
@@ -288,9 +326,10 @@ class UIHandler:
         peer_id = args[0]
         self.peer.disconnect_from_peer(peer_id)
     
+    # In UIHandler class
     def _cmd_quit(self, args):
-        """Exit the application."""
+        """Proper shutdown sequence"""
         print("Exiting application...")
         if self.peer:
             self.peer.stop()
-        sys.exit(0)
+        os._exit(0)  # Force exit all threads

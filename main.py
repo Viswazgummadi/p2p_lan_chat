@@ -25,11 +25,8 @@ def main():
     ui.print_welcome_message()
     
     # Get nickname if not provided
-    nickname = args.nickname
-    if not nickname:
-        nickname = ui.get_user_input("Enter your nickname: ")
-        if not nickname:
-            nickname = f"User-{id(nickname) % 10000}"  # Generate a simple nickname
+    nickname = args.nickname or ui.get_user_input("Enter your nickname: ") or "Anonymous"
+
     
     # Create and start peer
     try:

@@ -45,6 +45,10 @@ class Peer:
         self.peers = {}  # {peer_id: {'socket': socket, 'ip': ip, 'port': port, 'nickname': nickname}}
         self.peers_lock = threading.Lock()
         
+        # Add blocklist and connection tracking
+        self.blocklist = set()  # {(ip, port)}
+        self.connection_attempts = {}  # {(ip, port): attempt_count}
+
         # Message and file handling threads
         self.threads = []
     
@@ -75,6 +79,18 @@ class Peer:
         """Stop the peer and close all connections."""
         self.running = False
         
+        # Signal discovery to stop
+        self.discovery.running = False
+
+        # Close all sockets
+        with self.peers_lock:
+            for pid in list(self.peers.keys()):
+                self.disconnect_from_peer(pid)
+        # Join threads
+        for t in self.threads:
+            t.join(timeout=1)
+
+
         # Close connections to all peers
         with self.peers_lock:
             for peer_id, peer_info in list(self.peers.items()):
@@ -108,75 +124,101 @@ class Peer:
         Returns:
             bool: True if connection successful, False otherwise
         """
+        # Add to blocklist check
+        if (ip, port) in self.blocklist:
+            print(f"Blocked connection to {ip}:{port} ")
+            return False
+
         try:
+
             # Create socket and connect
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.settimeout(5)  # 5 second timeout for connection
             client_socket.connect((ip, port))
             
+
             # Send our information
             handshake_data = {
                 'type': 'handshake',
                 'peer_id': self.peer_id,
                 'nickname': self.nickname,
                 'ip': self.ip,
-                'port': self.port
+                'port': self.port,
             }
-            client_socket.sendall(json.dumps(handshake_data).encode() + b'\n')
-            
-            # Receive peer information
-            peer_data = client_socket.recv(1024).decode().strip()
-            try:
-                peer_info = json.loads(peer_data)
-                if peer_info.get('type') == 'handshake':
-                    peer_id = peer_info.get('peer_id')
-                    with self.peers_lock:
-                        if peer_id in self.peers:
-                            # Already connected
-                            client_socket.close()
-                            return True
-                        
-                        # Save peer information
-                        self.peers[peer_id] = {
-                            'socket': client_socket,
-                            'ip': ip,
-                            'port': port,
-                            'nickname': peer_info.get('nickname', 'Unknown')
-                        }
-                    
-                    # Start handler for this connection
-                    handler_thread = threading.Thread(
-                        target=self._handle_peer,
-                        args=(peer_id, client_socket)
-                    )
-                    handler_thread.daemon = True
-                    handler_thread.start()
-                    self.threads.append(handler_thread)
-                    
-                    print(f"Connected to {peer_info.get('nickname')} ({peer_id}) at {ip}:{port}")
-                    return True
-            except json.JSONDecodeError:
-                client_socket.close()
-                return False
+
+            client_socket.sendall(json.dumps(handshake_data).encode() + b'\x00')
+            response = client_socket.recv(1024).decode()
+            peer_info = json.loads(response.split('\x00')[0])
+
+            # Finalize connection
+            with self.peers_lock:
+                self.peers[peer_info['peer_id']] = {
+                    'socket': client_socket,
+                    'ip': ip,
+                    'port': port,
+                    'nickname': peer_info.get('nickname', 'Unknown'),
+                }
+
+
+
+            print(f"Connected to {peer_info['nickname']} at {ip}:{port}")
+            return True
+
+
         except Exception as e:
-            print(f"Failed to connect to peer at {ip}:{port}: {e}")
+            print(f"🔴 Connection failed: at {ip}:{port} :   {str(e)}")
             return False
+
     
-    def disconnect_from_peer(self, peer_id):
+    def disconnect_from_peer(self, identifier):
         """
         Disconnect from a specific peer.
         
         Args:
             peer_id (str): ID of the peer to disconnect from
         """
+
+        peer_id = self.find_peer_id(identifier)
+
+
+        if not peer_id:
+            print(f"Peer '{identifier}' not found")
+            return
+
+
+
         with self.peers_lock:
             if peer_id in self.peers:
+
+
+                peer_info = self.peers[peer_id]
+                # Close socket and cleanup
                 try:
-                    self.peers[peer_id]['socket'].close()
-                except:
-                    pass
-                del self.peers[peer_id]
-                print(f"Disconnected from peer {peer_id}")
+
+                    # Send formal disconnect notice
+                    disconnect_msg = {
+                        'type': 'disconnect',
+                        'peer_id': self.peer_id,
+                        'reason': 'user-requested'
+                    }
+                    peer_info['socket'].sendall(json.dumps(disconnect_msg).encode() + b'\x00')
+
+
+                    # Close connection
+                    peer_info['socket'].shutdown(socket.SHUT_RDWR)
+                    peer_info['socket'].close()
+                
+                    # Add to blocklist
+                    self.blocklist.add((peer_info['ip'], peer_info['port']))
+                
+                    del self.peers[peer_id]
+
+                    print(f"🔌 Disconnected from {peer_info['nickname']} ({peer_id[:8]})")
+                except Exception as e:
+                    print(f"⚠️ Error disconnecting: {str(e)}")
+                    # Still remove from peers dict even if there was an error
+                    if peer_id in self.peers:
+                        del self.peers[peer_id]
+
     
     def get_peers(self):
         """Get a list of connected peers."""
@@ -278,42 +320,64 @@ class Peer:
         """
         try:
             # Receive peer information
-            peer_data = client_socket.recv(1024).decode().strip()
-            try:
-                peer_info = json.loads(peer_data)
-                if peer_info.get('type') == 'handshake':
-                    peer_id = peer_info.get('peer_id')
-                    
-                    # Send our information
-                    handshake_response = {
-                        'type': 'handshake',
-                        'peer_id': self.peer_id,
-                        'nickname': self.nickname,
-                        'ip': self.ip,
-                        'port': self.port
-                    }
-                    client_socket.sendall(json.dumps(handshake_response).encode() + b'\n')
-                    
-                    with self.peers_lock:
-                        if peer_id in self.peers:
-                            # Already connected
-                            client_socket.close()
-                            return
-                        
-                        # Save peer information
-                        self.peers[peer_id] = {
-                            'socket': client_socket,
-                            'ip': peer_info.get('ip', addr[0]),
-                            'port': peer_info.get('port', addr[1]),
-                            'nickname': peer_info.get('nickname', 'Unknown')
-                        }
-                    
-                    print(f"Accepted connection from {peer_info.get('nickname')} ({peer_id}) at {addr}")
-                    
-                    # Handle communications with this peer
-                    self._handle_peer(peer_id, client_socket)
-            except json.JSONDecodeError:
+            peer_data = b''
+
+            while True:
+                chunk = client_socket.recv(1024)
+                if not chunk:
+                    break
+                peer_data += chunk
+                if b'\x00' in peer_data:  # Match client delimiter
+                    break
+            if not peer_data:
+                return
+
+            peer_info = json.loads(peer_data.decode().split('\x00')[0])
+            peer_id = peer_info.get('peer_id')  # Extract peer_id from peer_info
+
+            # Check if peer_id is valid
+            if not peer_id:
+                print("Invalid handshake: missing peer_id")
                 client_socket.close()
+                return
+
+            with self.peers_lock:
+                if peer_id in self.peers:
+                    # Already connected
+                    client_socket.close()
+                    return
+
+            # Send our information
+            handshake_response = {
+                'type': 'handshake',
+                'version': '2.0',  # ADD VERSION
+                'peer_id': self.peer_id,
+                'nickname': self.nickname,
+                'ip': self.ip,
+                'port': self.port
+            }
+            client_socket.sendall(json.dumps(handshake_response).encode() + b'\x00')
+                    
+            with self.peers_lock:
+                if peer_id in self.peers:
+                    # Already connected
+                    client_socket.close()
+                    return
+                        
+                # Save peer information
+                self.peers[peer_id] = {
+                    'socket': client_socket,
+                    'ip': peer_info.get('ip', addr[0]),
+                    'port': peer_info.get('port', addr[1]),
+                    'nickname': peer_info.get('nickname', 'Unknown')
+                }
+                    
+            print(f"Accepted connection from {peer_info.get('nickname')} ({peer_id}) at {addr}")
+                    
+            # Handle communications with this peer
+            self._handle_peer(peer_id, client_socket)
+        except json.JSONDecodeError:
+            client_socket.close()
         except Exception as e:
             print(f"Error handling incoming connection from {addr}: {e}")
             client_socket.close()
@@ -335,61 +399,62 @@ class Peer:
             client_socket (socket.socket): Socket for communicating with the peer
         """
         # Set a longer timeout for regular operations
-        client_socket.settimeout(60)  # 60 second timeout
+        client_socket.settimeout(30)  # 60 second timeout
         
         try:
+            buffer = b''
             while self.running:
                 try:
                     # Receive data
-                    data = b''
                     chunk = client_socket.recv(4096)
                     if not chunk:
                         break
-                    
-                    data += chunk
-                    
-                    # Process received data
-                    try:
-                        messages = data.decode().strip().split('\n')
-                        for message_str in messages:
-                            if not message_str:
-                                continue
-                                
-                            message = json.loads(message_str)
-                            message_type = message.get('type')
+                
+                    buffer += chunk
+                
+                    # Process complete messages
+                    while b'\x00' in buffer:
+                        msg_data, buffer = buffer.split(b'\x00', 1)
+                        if msg_data:
+                            try:
+                                message = json.loads(msg_data.decode())
+                                message_type = message.get('type')
                             
-                            if message_type == 'text':
-                                # Handle text message
-                                self.message_handler.handle_message(peer_id, message)
-                            elif message_type == 'file_request':
-                                # Handle file transfer request
-                                self.file_handler.handle_file_request(peer_id, message)
-                            elif message_type == 'file_data':
-                                # Handle file data
-                                self.file_handler.handle_file_data(peer_id, message)
-                            elif message_type == 'file_ack':
-                                # Handle file transfer acknowledgment
-                                self.file_handler.handle_file_ack(peer_id, message)
-                    except json.JSONDecodeError:
-                        print(f"Received invalid JSON from peer {peer_id}")
+                                if message_type == 'text':
+                                    self.message_handler.handle_message(peer_id, message)
+                                    pass
+                                elif message_type == 'disconnect':
+                                    print(f"Peer {peer_id} has disconnected")
+                                    return
+                                else:
+                                    print(f"Unknown message type: {message_type}")
+
+                            except json.JSONDecodeError:
+                                print(f"Received invalid JSON from peer {peer_id}")
+                
                 except socket.timeout:
-                    # Send a heartbeat to check if the connection is still alive
+                    # Send heartbeat
                     try:
                         heartbeat = {'type': 'heartbeat'}
-                        client_socket.sendall(json.dumps(heartbeat).encode() + b'\n')
-                    except:
-                        break  # Connection is dead
+                        client_socket.sendall(json.dumps(heartbeat).encode() + b'\x00')
+                    except Exception as e:
+                        print(f"Error sending heartbeat: {e}")
+                        break
                 except Exception as e:
+                    print(f"Error receiving data from peer {peer_id}: {e}")
+                    break
+
                     if self.running:
                         print(f"Error receiving data from peer {peer_id}: {e}")
                     break
         finally:
-            # Remove peer from our list
+            # Clean up
             with self.peers_lock:
                 if peer_id in self.peers:
                     try:
                         client_socket.close()
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"Error closing connection: {e}")
                     del self.peers[peer_id]
-                    print(f"Disconnected from peer {peer_id}")
+            print(f"Disconnected from peer {peer_id}")
+

@@ -40,77 +40,92 @@ class FileHandler:
         Returns:
             bool: True if the file transfer was initiated, False otherwise
         """
-        if not os.path.exists(file_path):
-            print(f"File not found: {file_path}")
-            return False
-        
+
         try:
-            file_size = os.path.getsize(file_path)
-            file_name = os.path.basename(file_path)
-            
+            # Validate peer connection
             with self.peer.peers_lock:
                 if peer_id not in self.peer.peers:
-                    print(f"Peer {peer_id} not found or not connected")
+                    print(f"🔴 Peer {peer_id} not connected")
                     return False
-                
+
+
                 peer_socket = self.peer.peers[peer_id]['socket']
-                transfer_id = f"{self.peer.peer_id}_{int(time.time())}_{hash(file_path) % 10000}"
+                peer_nickname = self.peer.peers[peer_id]['nickname']
+
+
+
+
+            if not os.path.exists(file_path):
+                print(f"🔴 File not found: {file_path}")
+                return False
+
+
+            
+            file_size = os.path.getsize(file_path)
+            file_name = os.path.basename(file_path)
+        
+            # Initiate transfer
+            transfer_id = f"{self.peer.peer_id}-{int(time.time())}"
+            print(f"📤 Starting transfer {transfer_id} to {peer_nickname}...")
+        
+
+            metadata = {
+                'type': 'file-metadata',
+                'transfer_id': transfer_id,
+                'file_name': file_name,
+                'file_size': file_size,
+                'checksum': self._calculate_checksum(file_path),
+                'chunks': (file_size // self.chunk_size) + 1
+            }
+            peer_socket.sendall(json.dumps(metadata).encode() + b'\x00')
+
+
+
                 
-                # Send file transfer request
-                request = {
-                    'type': 'file_request',
-                    'transfer_id': transfer_id,
-                    'sender_id': self.peer.peer_id,
-                    'sender_nickname': self.peer.nickname,
-                    'file_name': file_name,
-                    'file_size': file_size,
-                    'timestamp': time.time()
-                }
-                peer_socket.sendall(json.dumps(request).encode() + b'\n')
-                
-                # Send file in chunks
-                with open(file_path, 'rb') as file:
-                    # Calculate MD5 hash while sending
-                    hash_obj = hashlib.md5()
-                    
-                    sequence = 0
-                    while True:
-                        chunk = file.read(self.chunk_size)
-                        if not chunk:
-                            break
-                        
-                        hash_obj.update(chunk)
-                        encoded_chunk = base64.b64encode(chunk).decode('ascii')
-                        
-                        file_data = {
-                            'type': 'file_data',
-                            'transfer_id': transfer_id,
-                            'sequence': sequence,
-                            'data': encoded_chunk,
-                            'final': False
-                        }
-                        
-                        peer_socket.sendall(json.dumps(file_data).encode() + b'\n')
-                        sequence += 1
-                    
-                    # Send final chunk with hash
-                    final_data = {
-                        'type': 'file_data',
+
+            # Wait for confirmation
+            ack = self._receive_ack(peer_socket, transfer_id)
+            if not ack.get('approved', False):
+                print(f"🔴 Transfer rejected: {ack.get('reason', 'unknown')}")
+                return False
+
+
+
+            with open(file_path, 'rb') as f:
+                for seq in range(metadata['chunks']):
+                    chunk = f.read(self.chunk_size)
+                    packet = {
+                        'type': 'file-chunk',
                         'transfer_id': transfer_id,
-                        'sequence': sequence,
-                        'data': '',
-                        'final': True,
-                        'md5': hash_obj.hexdigest()
+                        'data': base64.b64encode(chunk).decode(),
+                        'sequence': seq
                     }
-                    peer_socket.sendall(json.dumps(final_data).encode() + b'\n')
-                
-                print(f"File '{file_name}' sent to {self.peer.peers[peer_id]['nickname']} ({peer_id})")
-                return True
-                
+                    peer_socket.sendall(json.dumps(packet).encode() + b'\x00')
+                    self._update_progress(seq+1, metadata['chunks'])
+
+            print(f"File {file_name} sent successfully")
+            return True
+
         except Exception as e:
-            print(f"Failed to send file to peer {peer_id}: {e}")
+            print(f"Transfer failed: {str(e)}")
             return False
+
+
     
+    def _receive_ack(self, socket, transfer_id, timeout=10):
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            try:
+                data = socket.recv(1024)
+                if b'\x00' in data:
+                    msg = json.loads(data.decode().split('\x00')[0])
+                    if msg.get('transfer_id') == transfer_id:
+                        return msg
+            except (socket.timeout, BlockingIOError):
+                continue
+        return {}
+
+
     def handle_file_request(self, sender_id, message):
         """
         Handle a file transfer request.
@@ -169,75 +184,29 @@ class FileHandler:
         """
         transfer_id = message.get('transfer_id')
         
+
+
         if transfer_id not in self.active_transfers:
-            print(f"Received file data for unknown transfer: {transfer_id}")
             return
-        
         transfer = self.active_transfers[transfer_id]
-        
-        if transfer['sender_id'] != sender_id:
-            print(f"Received file data from unexpected sender")
-            return
-        
+
         try:
-            # If this is the final chunk
-            if message.get('final', False):
-                # Close the file
+            data = base64.b64decode(message.get('data', ''))
+            transfer['file_handle'].write(data)
+            transfer['hash_obj'].update(data)
+            transfer['received_size'] += len(data)
+
+            if transfer['received_size'] >= transfer['file_size']:
                 transfer['file_handle'].close()
-                
-                # Verify the hash
-                received_md5 = message.get('md5', '')
-                calculated_md5 = transfer['hash_obj'].hexdigest()
-                
-                if received_md5 and received_md5 == calculated_md5:
-                    print(f"\n[FILE] Received file '{transfer['filename']}' successfully")
-                    print(f"Saved to: {transfer['download_path']}")
+                if transfer['hash_obj'].hexdigest() == message.get('checksum'):
+                    print(f"File {transfer['filename']} received successfully")
                 else:
-                    print(f"\n[FILE] Warning: File hash mismatch. File may be corrupted.")
-                    print(f"Received: {received_md5}")
-                    print(f"Calculated: {calculated_md5}")
-                
-                # Send acknowledgment
-                with self.peer.peers_lock:
-                    if sender_id in self.peer.peers:
-                        peer_socket = self.peer.peers[sender_id]['socket']
-                        ack = {
-                            'type': 'file_ack',
-                            'transfer_id': transfer_id,
-                            'status': 'completed',
-                            'message': 'File received successfully'
-                        }
-                        peer_socket.sendall(json.dumps(ack).encode() + b'\n')
-                
-                # Remove from active transfers
+                    print("File checksum mismatch")
                 del self.active_transfers[transfer_id]
-                return
-            
-            # Process file chunk
-            data = message.get('data', '')
-            if data:
-                decoded_data = base64.b64decode(data)
-                transfer['file_handle'].write(decoded_data)
-                transfer['hash_obj'].update(decoded_data)
-                transfer['received_size'] += len(decoded_data)
-                
-                # Print progress occasionally
-                if transfer['received_size'] % (10 * self.chunk_size) == 0:
-                    progress = min(100, int(transfer['received_size'] * 100 / transfer['file_size']))
-                    print(f"Receiving file: {progress}% complete")
-                
+
         except Exception as e:
-            print(f"Error processing file data: {e}")
-            
-            # Clean up
-            try:
-                transfer['file_handle'].close()
-            except:
-                pass
-            
-            # Remove from active transfers
-            del self.active_transfers[transfer_id]
-    
+            print(f"File transfer error: {str(e)}")
+
     def handle_file_ack(self, sender_id, message):
         """
         Handle file transfer acknowledgment.
@@ -273,3 +242,21 @@ class FileHandler:
             return f"{size_bytes/(1024*1024):.1f} MB"
         else:
             return f"{size_bytes/(1024*1024*1024):.1f} GB"
+    def _cleanup_transfer(self, transfer_id):
+        if transfer_id in self.active_transfers:
+            try:
+                self.active_transfers[transfer_id]['file_handle'].close()
+                os.remove(self.active_transfers[transfer_id]['download_path'])
+            except:
+                pass
+            del self.active_transfers[transfer_id]
+    def _calculate_checksum(self, file_path):
+        hash_md5 = hashlib.md5()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+
+    def _update_progress(self, current, total):
+        progress = int(50 * current / total)
+        print(f"\r[{'#'*progress}{'.'*(50-progress)}] {current}/{total}", end='')

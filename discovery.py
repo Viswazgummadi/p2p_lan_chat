@@ -25,6 +25,10 @@ class Discovery:
         self.broadcast_interval = broadcast_interval
         self.running = False
         self.threads = []
+        self.discovered_peers = {}
+        self.discovery_lock = threading.Lock()
+
+
     
     def start(self):
         """Start the discovery service."""
@@ -82,49 +86,40 @@ class Discovery:
     def _listen_for_peers(self):
         """Listen for peer discovery broadcasts."""
         # Create UDP socket for listening
+
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(('', self.discovery_port))
-            
+            s.settimeout(1)
+
             while self.running:
                 try:
-                    # Set socket timeout so we can check running flag
-                    s.settimeout(1)
-                    
-                    try:
-                        # Receive discovery message
-                        data, addr = s.recvfrom(1024)
-                        
-                        # Parse message
-                        try:
-                            message = json.loads(data.decode())
-                            if message.get('type') == 'discovery':
-                                peer_id = message.get('peer_id')
-                                ip = message.get('ip')
-                                port = message.get('port')
-                                
-                                # Don't connect to self
-                                if peer_id == self.peer.peer_id:
-                                    continue
-                                
-                                # Check if already connected
-                                already_connected = False
-                                with self.peer.peers_lock:
-                                    already_connected = peer_id in self.peer.peers
-                                
-                                if not already_connected:
-                                    print(f"Discovered peer {message.get('nickname')} ({peer_id}) at {ip}:{port}")
-                                    # Try to connect
-                                    self.peer.connect_to_peer(ip, port)
-                        except json.JSONDecodeError:
-                            # Invalid message
-                            pass
-                    except socket.timeout:
-                        # This is expected, we set a timeout to check running flag
-                        pass
-                        
+                    data, addr = s.recvfrom(1024)
+                    message = json.loads(data.decode())
+                    if message.get('type') != 'discovery':
+                        continue
+
+                    ip = message['ip']
+                    port = int(message['port'])
+                    peer_id = message['peer_id']
+
+                    if (ip, port) in self.peer.blocklist or peer_id == self.peer.peer_id:
+                        continue
+                    with self.discovery_lock:
+                        if peer_id not in self.discovered_peers:
+                            print(f"Discovered {message['nickname']} at {ip}:{port}")
+                            self.discovered_peers[peer_id] = {
+                                'ip': ip,
+                                'port': port,
+                                'nickname': message.get('nickname', 'Unknown'),
+                                'last_seen': time.time(),
+                            }
+                except (socket.timeout, json.JSONDecodeError):
+                    continue
                 except Exception as e:
-                    if self.running:  # Only show error if we're still running
-                        print(f"Error listening for peers: {e}")
-                        # Wait a bit before retrying
-                        time.sleep(5)
+                    print(f"Discovery error: {e}")
+    def get_discovered_peers(self):
+        with self.discovery_lock:
+            return self.discovered_peers.copy()
+
+

@@ -43,7 +43,7 @@ class MessageHandler:
                     'content': message_content,
                     'timestamp': time.time()
                 }
-                peer_socket.sendall(json.dumps(message).encode() + b'\n')
+                peer_socket.sendall(json.dumps(message).encode() + b'\x00')
                 return True
             except Exception as e:
                 print(f"Failed to send message to peer {peer_id}: {e}")
@@ -96,5 +96,9 @@ class MessageHandler:
         # Format timestamp
         time_str = time.strftime('%H:%M:%S', time.localtime(timestamp))
         
-        # Print the message
-        print(f"[{time_str}] {sender_nickname}: {content}")
+
+        # Print the message with a carriage return to overwrite any prompt
+        print(f"\r[{time_str}] {sender_nickname}: {content}")
+        print("CHAT> ", end='', flush=True)  # Reprint the prompt
+
+
