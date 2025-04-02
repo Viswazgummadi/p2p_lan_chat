@@ -59,13 +59,27 @@ class Discovery:
             
             while self.running:
                 try:
+                    # Get the current list of discovered peers to share
+                    with self.discovery_lock:
+                        known_peers = []
+                        for peer_id, info in self.discovered_peers.items():
+                            known_peers.append({
+                                'peer_id': peer_id,
+                                'nickname': info['nickname'],
+                                'ip': info['ip'],
+                                'port': info['port'],
+                                'last_seen': info['last_seen']
+                            })
+                            
                     # Prepare discovery message
                     discovery_msg = {
                         'type': 'discovery',
                         'peer_id': self.peer.peer_id,
                         'nickname': self.peer.nickname,
                         'ip': self.peer.ip,
-                        'port': self.peer.port
+                        'port': self.peer.port,
+                        'known_peers': known_peers  # Include all discovered peers
+
                     }
                     
                     # Broadcast the message
@@ -94,7 +108,7 @@ class Discovery:
 
             while self.running:
                 try:
-                    data, addr = s.recvfrom(1024)
+                    data, addr = s.recvfrom(4096)
                     message = json.loads(data.decode())
                     if message.get('type') != 'discovery':
                         continue
@@ -114,10 +128,34 @@ class Discovery:
                                 'nickname': message.get('nickname', 'Unknown'),
                                 'last_seen': time.time(),
                             }
+                        # Process peer's known peers
+                        for known_peer in message.get('known_peers', []):
+                            k_peer_id = known_peer.get('peer_id')
+                            if not k_peer_id or k_peer_id == self.peer.peer_id:
+                                continue
+                                
+                            k_ip = known_peer.get('ip')
+                            k_port = known_peer.get('port')
+                            
+                            if not k_ip or not k_port or (k_ip, k_port) in self.peer.blocklist:
+                                continue
+                                
+                            if k_peer_id not in self.discovered_peers:
+                                print(f"Discovered {known_peer.get('nickname', 'Unknown')} at {k_ip}:{k_port} (via {message['nickname']})")
+                                
+                            # Add or update the indirectly discovered peer
+                            self.discovered_peers[k_peer_id] = {
+                                'ip': k_ip,
+                                'port': int(k_port),
+                                'nickname': known_peer.get('nickname', 'Unknown'),
+                                'last_seen': time.time()
+                            }
+
                 except (socket.timeout, json.JSONDecodeError):
                     continue
                 except Exception as e:
                     print(f"Discovery error: {e}")
+    
     def get_discovered_peers(self):
         with self.discovery_lock:
             return self.discovered_peers.copy()

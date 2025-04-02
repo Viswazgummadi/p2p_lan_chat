@@ -26,7 +26,6 @@ class UIHandler:
             '/disconnect': (self._cmd_disconnect, 'Disconnect from a peer: /disconnect <peer_id>'),
             '/quit': (self._cmd_quit, 'Exit the application'),
             '/clear': (self._cmd_clear, 'Clear the screen'),
-            '/exit': (self._cmd_quit, 'Exit the program'),
             '/discover': (self._cmd_discover, 'List all discovered peers')
         }
 
@@ -48,6 +47,9 @@ class UIHandler:
     def _cmd_discover(self, args):
         """Show discovered peers"""
         discovered = self.peer.discovery.get_discovered_peers()
+        if not discovered:
+            print("\nNo peers discovered yet. Wait for peer discovery broadcasts.")
+            return
         print("\nDiscovered peers:")
         for pid, info in discovered.items():
             print(f" {info['nickname']} ({pid[:8]})")
@@ -83,25 +85,35 @@ class UIHandler:
         # Split command and arguments
         parts = user_input[1:].split(maxsplit=1)
         command = parts[0].lower()
-        args = parts[1].split() if len(parts) > 1 else []
-
-        # Improved command mapping
-        commands = {
-            'discover': self._cmd_discover,
-            'help': self._cmd_help,
-            'connect': self._cmd_connect,
-            'peers': self._cmd_peers,
-            'send': self._cmd_send,
-            'sendall': self._cmd_sendall,
-            'file': self._cmd_file,
-            'disconnect': self._cmd_disconnect,
-            'quit': self._cmd_quit,
-            'clear': self._cmd_clear,  # ADDED MISSING CLEAR COMMAND
-            'exit': self._cmd_quit
-        }
-
-        if command in commands:
-            commands[command](args)
+        args = []
+        if len(parts) > 1:
+            if command in ['send', 'sendall']:
+                subparts = parts[1].split(maxsplit=1)
+                args = subparts if len(subparts) > 1 else [subparts[0], '']
+            else:
+                # Regular argument splitting
+                args = parts[1].split()
+         # Process the command
+        if command == 'help':
+            self._cmd_help(args)
+        elif command == 'connect':
+            self._cmd_connect(args)
+        elif command == 'peers':
+            self._cmd_peers(args)
+        elif command == 'send':
+            self._cmd_send(args)
+        elif command == 'sendall':
+            self._cmd_sendall(args)
+        elif command == 'file':
+            self._cmd_file(args)
+        elif command == 'disconnect':
+            self._cmd_disconnect(args)
+        elif command == 'quit' or command == 'exit':  # Support both quit and exit
+            self._cmd_quit(args)
+        elif command == 'clear':
+            self._cmd_clear(args)
+        elif command == 'discover':
+            self._cmd_discover(args)
         else:
             print(f"Unknown command: /{command}")
             print("Type /help for available commands")
@@ -147,45 +159,16 @@ class UIHandler:
         while True:
             try:
                 user_input = input("\033[1;32mCHAT>\033[0m ").strip()
-                # Process non-empty input
-                if user_input.lower() in ('/quit', '/exit'):
-                    self._cmd_quit([])
-                    return
 
                 if user_input.strip():
                     self.process_command(user_input)
 
 
             except KeyboardInterrupt:
-                print("\nUse /quit to exit properly")
+                print("\nUse /quit or /exit to exit properly")
             except Exception as e:
                 print(f"Error: {str(e)}")
                 
-        """
-                if user_input.startswith('/'):
-                    # Parse the command
-                    parts = user_input.split()
-                    command = parts[0].lower()
-                    args = parts[1:]
-                    
-                    if command in self.commands:
-                        # Execute the command
-                        self.commands[command][0](args)
-                    else:
-                        print(f"Unknown command: {command}")
-                        print("Type /help to see available commands")
-                else:
-                    # Send message to all peers
-                    if not self.peer.peers:
-                        print("You are not connected to any peers. Connect with /connect or wait for peers to be discovered.")
-                    else:
-                        results = self.peer.send_message_to_all(user_input)
-                        success_count = sum(1 for success in results.values() if success)
-                        if success_count > 0:
-                            print(f"Message sent to {success_count} peer(s)")"""
-
-    
-
 
     def _get_non_blocking_input(self):
         """Platform-independent non-blocking input"""
@@ -201,6 +184,7 @@ class UIHandler:
         print("\nAvailable commands:")
         for cmd, (_, desc) in sorted(self.commands.items()):
             print(f"  {cmd:<12} - {desc}")
+        print("\nYou can also use '/exit' as an alternative to '/quit'")
         print()
     
     def _cmd_connect(self, args):
@@ -246,11 +230,11 @@ class UIHandler:
             args (list): Command arguments [peer_id, message...]
         """
         if len(args) < 2:
-            print("Usage: /send [username|peer_id] message")
+            print("Usage: /send <username|peer_id> message")
             return
         
         identifier = args[0]
-        message = ' '.join(args[1:])
+        message = args[1]
 
         peer_id = self.peer.find_peer_id(identifier)
         
@@ -260,9 +244,9 @@ class UIHandler:
             return
 
         if self.peer.send_message_to_peer(peer_id, message):
-            print(f"Message sent to peer {peer_id}")
+            print(f"Message sent to {self.peer.get_username(peer_id)}")
         else:
-            print(f"Failed to send message to peer {peer_id}")
+            print(f"Failed to send message to peer {identifier}")
     
     def _cmd_sendall(self, args):
         """
@@ -275,10 +259,10 @@ class UIHandler:
             print("Usage: /sendall <message>")
             return
         
-        message = ' '.join(args)
+        message = args[0]
         results = self.peer.send_message_to_all(message)
         
-        success = sum(results.values())
+        success = sum(1 for success in results.values() if success)
         total = len(results)
         print(f"Delivered to {success}/{total} peers")
 
@@ -331,5 +315,10 @@ class UIHandler:
         """Proper shutdown sequence"""
         print("Exiting application...")
         if self.peer:
-            self.peer.stop()
+            try:
+                self.peer.stop()
+            except Exception as e:
+                print(f"Error stopping peer: {e}")
+        # Force immediate exit
+        sys.stdout.flush()  # Flush stdout to ensure all messages are displayed
         os._exit(0)  # Force exit all threads

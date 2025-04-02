@@ -98,7 +98,7 @@ class MessageHandler:
         
 
         # Print the message with a carriage return to overwrite any prompt
-        print(f"\r[{time_str}] {sender_nickname}: {content}")
+        print(f"\n\033[2K\r[{time_str}] {message['sender_nickname']}: {content}")
         print("CHAT> ", end='', flush=True)  # Reprint the prompt
 
 
