@@ -2,11 +2,16 @@
 """
 File handling functionality for the P2P LAN Chat System.
 """
+
 import os
 import json
 import base64
 import hashlib
 import time
+import socket
+import logging
+
+
 
 class FileHandler:
     """
@@ -28,7 +33,9 @@ class FileHandler:
         
         # Create download directory if it doesn't exist
         os.makedirs(self.download_dir, exist_ok=True)
-    
+        logging.basicConfig(level=logging.DEBUG)
+
+
     def send_file(self, peer_id, file_path):
         """
         Send a file to a specific peer.
@@ -77,37 +84,45 @@ class FileHandler:
                 'checksum': self._calculate_checksum(file_path),
                 'chunks': (file_size // self.chunk_size) + 1
             }
-            peer_socket.sendall(json.dumps(metadata).encode() + b'\x00')
-
-
+            try:
+                peer_socket.sendall(json.dumps(metadata).encode() + b'\x00')
+            except (BrokenPipeError, ConnectionResetError) as e:
+                print(f"🔴 Connection lost: {e}")
+                self.peer.disconnect_from_peer(peer_id)
+                return False
 
                 
 
-            # Wait for confirmation
+            # Enhanced ACK handling
             ack = self._receive_ack(peer_socket, transfer_id)
             if not ack.get('approved', False):
                 print(f"🔴 Transfer rejected: {ack.get('reason', 'unknown')}")
                 return False
 
-
-
+            # File transfer with progress
             with open(file_path, 'rb') as f:
                 for seq in range(metadata['chunks']):
                     chunk = f.read(self.chunk_size)
+                    if not chunk:
+                        break
                     packet = {
                         'type': 'file-chunk',
                         'transfer_id': transfer_id,
                         'data': base64.b64encode(chunk).decode(),
                         'sequence': seq
                     }
-                    peer_socket.sendall(json.dumps(packet).encode() + b'\x00')
+                    try:
+                        peer_socket.sendall(json.dumps(packet).encode() + b'\x00')
+                    except (ConnectionError, TimeoutError) as e:
+                        print(f"🔴 Transfer interrupted: {e}")
+                        return False
                     self._update_progress(seq+1, metadata['chunks'])
-
-            print(f"File {file_name} sent successfully")
+            
+            print(f"\n✅ File {file_name} sent successfully")
             return True
 
         except Exception as e:
-            print(f"Transfer failed: {str(e)}")
+            print(f"🔴 Critical transfer failure: {e}")
             return False
 
 
@@ -117,14 +132,21 @@ class FileHandler:
         while time.time() < end_time:
             try:
                 data = socket.recv(1024)
+                if not data:
+                    continue
                 if b'\x00' in data:
-                    msg = json.loads(data.decode().split('\x00')[0])
+                    msg = json.loads(data.decode().split('\x00', 1)[0])
                     if msg.get('transfer_id') == transfer_id:
                         return msg
             except (socket.timeout, BlockingIOError):
                 continue
+            except json.JSONDecodeError as e:
+                print(f"⚠️ Invalid ACK format: {e}")
+                continue
+            except ConnectionError as e:
+                print(f"⚠️ Connection error during ACK: {e}")
+                break
         return {}
-
 
     def handle_file_request(self, sender_id, message):
         """
@@ -257,6 +279,7 @@ class FileHandler:
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
+    # Modified progress display
     def _update_progress(self, current, total):
         progress = int(50 * current / total)
-        print(f"\r[{'#'*progress}{'.'*(50-progress)}] {current}/{total}", end='')
+        print(f"\r[{'#'*progress}{'-'*(50-progress)}] {current}/{total}", end='', flush=True)
