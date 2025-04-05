@@ -201,13 +201,3 @@ Use tools like **Wireshark** or **tcpdump** to monitor network traffic on ports 
 ```bash
 tcpdump -i eth0 port 35000 or portrange 8000-9000
 ```
-
----
-
-## License
-
-This project is licensed under the **MIT License**.
-
----
-
-_Last updated: April 5, 2025_
