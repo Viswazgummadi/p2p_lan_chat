@@ -169,7 +169,7 @@ class FileHandler:
                             return False
                         
                         # Small delay to prevent overwhelming the receiver
-                        time.sleep(0.01)
+                        time.sleep(0.001)
             
             except Exception as e:
                 print(f"\n🔴 Error reading file: {e}")
