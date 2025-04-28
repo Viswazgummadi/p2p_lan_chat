@@ -13,6 +13,7 @@ import logging
 
 
 
+
 class FileHandler:
     """
     Handles sending and receiving files between peers.
@@ -30,10 +31,14 @@ class FileHandler:
         self.chunk_size = chunk_size
         self.download_dir = download_dir
         self.active_transfers = {}  # {transfer_id: {filename, file_size, received_size, file_handle, hash_obj}}
+        # A dictionary tracking all ongoing file transfers
+        
         
         # Create download directory if it doesn't exist
         os.makedirs(self.download_dir, exist_ok=True)
         logging.basicConfig(level=logging.DEBUG)
+
+
 
 
     def send_file(self, peer_id, file_path):
@@ -131,6 +136,13 @@ class FileHandler:
                 print(f"🔴 Transfer rejected: {ack.get('reason', 'unknown')}")
                 return False
         
+        
+#      {
+#     "transfer_id": "123abc",
+#     "status": "received",
+#     "timestamp": "2025-04-22T14:00:00"
+#      }
+
         # Transfer file in chunks
             chunks_sent = 0
             total_chunks = metadata['chunks']
